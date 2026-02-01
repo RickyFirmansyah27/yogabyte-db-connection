@@ -3,214 +3,138 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
-	"os/signal"
-	"syscall"
+	"path/filepath"
+	"runtime"
+	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/cors"
-	"github.com/gofiber/fiber/v2/middleware/logger"
-	"github.com/gofiber/fiber/v2/middleware/recover"
-
-	"myapp/src/database"
-	appLogger "myapp/src/logger"
+	"github.com/jackc/pgx/v5"
+	"github.com/joho/godotenv"
 )
 
-type Account struct {
-	ID      int    `json:"id"`
-	Name    string `json:"name"`
-	Age     int    `json:"age"`
-	Country string `json:"country"`
-	Balance int    `json:"balance"`
-}
+var (
+	host        string
+	port        string
+	dbName      string
+	dbUser      string
+	dbPassword  string
+	sslRootCert string
+)
 
-type TransferRequest struct {
-	Amount int `json:"amount"`
-}
+func loadConfig() {
+	_, currentFile, _, _ := runtime.Caller(0)
+	dir := filepath.Dir(currentFile)
+	envPath := filepath.Join(dir, ".env")
 
-var appLog = appLogger.New()
+	if err := godotenv.Load(envPath); err != nil {
+		fmt.Printf("Error loading .env file: %v\n", err)
+	}
+
+	host = os.Getenv("DB_HOST")
+	port = os.Getenv("DB_PORT")
+	dbName = os.Getenv("DB_NAME")
+	dbUser = os.Getenv("DB_USER")
+	dbPassword = os.Getenv("DB_PASSWORD")
+	sslRootCert = filepath.Join(dir, "config", "root.crt")
+}
 
 func main() {
-	ctx := context.Background()
+	loadConfig()
 
-	if err := database.InitDB(); err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
-	}
-	defer database.CloseDB()
+	// Build connection string like Python does
+	connString := fmt.Sprintf(
+		"host=%s port=%s dbname=%s user=%s password=%s sslmode=verify-ca sslrootcert=%s",
+		host, port, dbName, dbUser, dbPassword, sslRootCert,
+	)
 
-	if err := database.TestConnection(ctx); err != nil {
-		log.Fatalf("Failed to test database connection: %v", err)
-	}
+	fmt.Printf(">>>> Connecting to: host=%s port=%s dbname=%s\n", host, port, dbName)
 
-	app := fiber.New(fiber.Config{
-		AppName: "YugabyteDB Fiber API",
-	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	app.Use(recover.New())
-	app.Use(logger.New())
-	app.Use(cors.New())
+	conn, err := pgx.Connect(ctx, connString)
+	checkIfError(err)
+	defer conn.Close(context.Background())
 
-	app.Get("/", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{
-			"message": "YugabyteDB Fiber API",
-			"status":  "running",
-		})
-	})
+	fmt.Println(">>>> Successfully connected to YugabyteDB!")
 
-	api := app.Group("/api")
-
-	api.Post("/setup", setupDatabase)
-	api.Get("/accounts", getAccounts)
-	api.Post("/transfer", transferMoney)
-
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		if err := app.Listen(":3000"); err != nil {
-			log.Fatalf("Failed to start server: %v", err)
-		}
-	}()
-
-	appLog.Info("Server started on http://localhost:3000")
-
-	<-quit
-	appLog.Info("Shutting down server...")
-	if err := app.Shutdown(); err != nil {
-		log.Fatalf("Failed to shutdown server: %v", err)
-	}
+	createDatabase(ctx, conn)
+	selectAccounts(ctx, conn)
+	transferMoneyBetweenAccounts(ctx, conn, 800)
+	selectAccounts(ctx, conn)
 }
 
-func setupDatabase(c *fiber.Ctx) error {
-	ctx := c.Context()
+func createDatabase(ctx context.Context, conn *pgx.Conn) {
+	_, err := conn.Exec(ctx, `DROP TABLE IF EXISTS DemoAccount`)
+	checkIfError(err)
 
-	if err := database.ExecuteCommand(ctx, "DROP TABLE IF EXISTS DemoAccount"); err != nil {
-		return c.Status(500).JSON(fiber.Map{
-			"error": err.Error(),
-		})
-	}
-
-	createTableSQL := `CREATE TABLE DemoAccount (
+	_, err = conn.Exec(ctx, `CREATE TABLE DemoAccount (
 		id int PRIMARY KEY,
 		name varchar,
 		age int,
 		country varchar,
-		balance int
-	)`
-	if err := database.ExecuteCommand(ctx, createTableSQL); err != nil {
-		return c.Status(500).JSON(fiber.Map{
-			"error": err.Error(),
-		})
-	}
+		balance int)`)
+	checkIfError(err)
 
-	insertSQL := `INSERT INTO DemoAccount VALUES
+	_, err = conn.Exec(ctx, `INSERT INTO DemoAccount VALUES
 		(1, 'Jessica', 28, 'USA', 10000),
-		(2, 'John', 28, 'Canada', 9000)`
-	if err := database.ExecuteCommand(ctx, insertSQL); err != nil {
-		return c.Status(500).JSON(fiber.Map{
-			"error": err.Error(),
-		})
-	}
+		(2, 'John', 28, 'Canada', 9000)`)
+	checkIfError(err)
 
-	appLog.Info("Successfully created table DemoAccount")
-
-	return c.JSON(fiber.Map{
-		"message": "Database setup completed successfully",
-	})
+	fmt.Println(">>>> Successfully created table DemoAccount.")
 }
 
-func getAccounts(c *fiber.Ctx) error {
-	ctx := c.Context()
+func selectAccounts(ctx context.Context, conn *pgx.Conn) {
+	fmt.Println(">>>> Selecting accounts:")
 
-	rows, err := database.CommandWithParams(ctx, "SELECT id, name, age, country, balance FROM DemoAccount")
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{
-			"error": err.Error(),
-		})
-	}
+	rows, err := conn.Query(ctx, "SELECT name, age, country, balance FROM DemoAccount")
+	checkIfError(err)
 	defer rows.Close()
 
-	var accounts []Account
 	for rows.Next() {
-		var acc Account
-		if err := rows.Scan(&acc.ID, &acc.Name, &acc.Age, &acc.Country, &acc.Balance); err != nil {
-			return c.Status(500).JSON(fiber.Map{
-				"error": err.Error(),
-			})
-		}
-		accounts = append(accounts, acc)
+		var name, country string
+		var age, balance int
+		err = rows.Scan(&name, &age, &country, &balance)
+		checkIfError(err)
+		fmt.Printf("name = %s, age = %v, country = %s, balance = %v\n",
+			name, age, country, balance)
 	}
-
-	if err := rows.Err(); err != nil {
-		return c.Status(500).JSON(fiber.Map{
-			"error": err.Error(),
-		})
-	}
-
-	appLog.Info("Selecting accounts")
-	for _, acc := range accounts {
-		appLog.Info(fmt.Sprintf("name = %s, age = %d, country = %s, balance = %d",
-			acc.Name, acc.Age, acc.Country, acc.Balance))
-	}
-
-	return c.JSON(fiber.Map{
-		"accounts": accounts,
-	})
 }
 
-func transferMoney(c *fiber.Ctx) error {
-	ctx := c.Context()
+func transferMoneyBetweenAccounts(ctx context.Context, conn *pgx.Conn, amount int) {
+	tx, err := conn.Begin(ctx)
+	checkIfError(err)
 
-	var req TransferRequest
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{
-			"error": "Invalid request body",
-		})
+	_, err = tx.Exec(ctx, `UPDATE DemoAccount SET balance = balance - $1 WHERE name = 'Jessica'`, amount)
+	if checkIfTxAborted(err) {
+		tx.Rollback(ctx)
+		return
 	}
 
-	if req.Amount <= 0 {
-		return c.Status(400).JSON(fiber.Map{
-			"error": "Amount must be greater than 0",
-		})
+	_, err = tx.Exec(ctx, `UPDATE DemoAccount SET balance = balance + $1 WHERE name = 'John'`, amount)
+	if checkIfTxAborted(err) {
+		tx.Rollback(ctx)
+		return
 	}
 
-	tx, err := database.StartTransaction(ctx)
+	err = tx.Commit(ctx)
+	if checkIfTxAborted(err) {
+		return
+	}
+
+	fmt.Printf(">>>> Transferred %d between accounts.\n", amount)
+}
+
+func checkIfError(err error) {
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{
-			"error": err.Error(),
-		})
+		panic(err)
 	}
+}
 
-	if err := tx.Execute(ctx, "UPDATE DemoAccount SET balance = balance - $1 WHERE name = 'Jessica'", req.Amount); err != nil {
-		tx.Rollback(ctx)
-		if pgErr, ok := err.(interface{ Code() string }); ok && pgErr.Code() == "40001" {
-			return c.Status(409).JSON(fiber.Map{
-				"error": "The operation is aborted due to a concurrent transaction. Consider adding retry logic.",
-			})
-		}
-		return c.Status(500).JSON(fiber.Map{
-			"error": err.Error(),
-		})
+func checkIfTxAborted(err error) bool {
+	if err != nil {
+		fmt.Printf("Transaction aborted: %v\n", err)
+		return true
 	}
-
-	if err := tx.Execute(ctx, "UPDATE DemoAccount SET balance = balance + $1 WHERE name = 'John'", req.Amount); err != nil {
-		tx.Rollback(ctx)
-		return c.Status(500).JSON(fiber.Map{
-			"error": err.Error(),
-		})
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		tx.Rollback(ctx)
-		return c.Status(500).JSON(fiber.Map{
-			"error": err.Error(),
-		})
-	}
-
-	appLog.Info(fmt.Sprintf("Transferred %d between accounts", req.Amount))
-
-	return c.JSON(fiber.Map{
-		"message": fmt.Sprintf("Successfully transferred %d from Jessica to John", req.Amount),
-	})
+	return false
 }

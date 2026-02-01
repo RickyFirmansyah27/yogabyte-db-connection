@@ -1,6 +1,6 @@
 import pg from 'pg';
 import { Logger } from './logger.js';
-import { dbConfig } from '../config/database.js';
+import { dbConfig } from '../config/dbConfig.js';
 
 const { Pool } = pg;
 const contextLogger = '[Yugabyte DB - connection]';

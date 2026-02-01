@@ -3,12 +3,12 @@ package database
 import (
 	"context"
 	"fmt"
+	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"myapp/config"
-	"myapp/src/logger"
+	"yogabyte-db-connection/config"
+	"yogabyte-db-connection/src/logger"
 )
 
 var (
@@ -22,13 +22,21 @@ func InitDB() error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
+	log.Info(fmt.Sprintf("Connecting to: host=%s port=%s dbname=%s", cfg.Host, cfg.Port, cfg.Database))
+
 	poolConfig, err := cfg.GetPoolConfig()
 	if err != nil {
 		return fmt.Errorf("failed to get pool config: %w", err)
 	}
 
-	pool, err = pgxpool.NewWithConfig(context.Background(), poolConfig)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pool, err = pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
+		log.Error("Database connection error", map[string]interface{}{
+			"error": err.Error(),
+		})
 		return fmt.Errorf("failed to create connection pool: %w", err)
 	}
 
@@ -45,7 +53,10 @@ func CloseDB() {
 	}
 }
 
-func TestConnection(ctx context.Context) error {
+func TestConnection() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		log.Error("Database connection error", map[string]interface{}{
@@ -73,26 +84,10 @@ func TestConnection(ctx context.Context) error {
 		return err
 	}
 
-	log.Info("Database connection successfully", map[string]interface{}{
-		"connection": result == 1,
-	})
+	log.Info("Successfully connected to YugabyteDB!")
 	log.Info(fmt.Sprintf("version: %s", version))
 
 	return nil
-}
-
-func CommandWithParams(ctx context.Context, sql string, params ...interface{}) (pgx.Rows, error) {
-	log.Info(fmt.Sprintf("SQL: %s - Params: %v", sql, params))
-
-	rows, err := pool.Query(ctx, sql, params...)
-	if err != nil {
-		log.Error("Database query error", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return nil, err
-	}
-
-	return rows, nil
 }
 
 func ExecuteCommand(ctx context.Context, sql string, params ...interface{}) error {
@@ -109,58 +104,15 @@ func ExecuteCommand(ctx context.Context, sql string, params ...interface{}) erro
 	return nil
 }
 
+func Query(ctx context.Context, sql string, params ...interface{}) (*pgxpool.Pool, error) {
+	log.Info(fmt.Sprintf("SQL: %s - Params: %v", sql, params))
+	return pool, nil
+}
+
 type Transaction struct {
-	tx pgx.Tx
-}
-
-func StartTransaction(ctx context.Context) (*Transaction, error) {
-	log.Info("Starting transaction")
-
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		log.Error("Failed to start transaction", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return nil, err
+	tx interface {
+		Exec(ctx context.Context, sql string, arguments ...interface{}) (interface{}, error)
+		Commit(ctx context.Context) error
+		Rollback(ctx context.Context) error
 	}
-
-	return &Transaction{tx: tx}, nil
-}
-
-func (t *Transaction) Execute(ctx context.Context, sql string, params ...interface{}) error {
-	log.Info(fmt.Sprintf("Transaction SQL: %s - Params: %v", sql, params))
-
-	_, err := t.tx.Exec(ctx, sql, params...)
-	if err != nil {
-		log.Error("Transaction execute error", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return err
-	}
-
-	return nil
-}
-
-func (t *Transaction) Query(ctx context.Context, sql string, params ...interface{}) (pgx.Rows, error) {
-	log.Info(fmt.Sprintf("Transaction SQL: %s - Params: %v", sql, params))
-
-	rows, err := t.tx.Query(ctx, sql, params...)
-	if err != nil {
-		log.Error("Transaction query error", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return nil, err
-	}
-
-	return rows, nil
-}
-
-func (t *Transaction) Commit(ctx context.Context) error {
-	log.Info("Committing transaction")
-	return t.tx.Commit(ctx)
-}
-
-func (t *Transaction) Rollback(ctx context.Context) error {
-	log.Info("Rolling back transaction")
-	return t.tx.Rollback(ctx)
 }
