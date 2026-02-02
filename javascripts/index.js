@@ -1,93 +1,78 @@
-import {
-  DBConnection,
-  commandWithParams,
-  startTransaction,
-  executeSQLTransaction,
-  commitTransaction,
-  rollbackTransaction
-} from './src/database.js';
+import { InitLogger, GetLogger, Logger } from './src/logger.js';
+import { Connect, CloseDB, ExecuteSQLWithParams, StartTransaction, CommitTransaction, RollbackTransaction, ExecuteSQLTransaction } from './src/database.js';
 
 const createDatabase = async () => {
-  let stmt = "DROP TABLE IF EXISTS DemoAccount";
-  await commandWithParams(stmt);
+  await ExecuteSQLWithParams("DROP TABLE IF EXISTS DemoAccount");
 
-  stmt = `CREATE TABLE DemoAccount (
+  await ExecuteSQLWithParams(`CREATE TABLE DemoAccount (
             id int PRIMARY KEY,
             name varchar,
             age int,
             country varchar,
-            balance int)`;
-  await commandWithParams(stmt);
+            balance int)`);
 
-  stmt = `INSERT INTO DemoAccount VALUES
+  await ExecuteSQLWithParams(`INSERT INTO DemoAccount VALUES
             (1, 'Jessica', 28, 'USA', 10000),
-            (2, 'John', 28, 'Canada', 9000)`;
-  await commandWithParams(stmt);
+            (2, 'John', 28, 'Canada', 9000)`);
 
-  console.log(">>>> Successfully created table DemoAccount.");
+  Logger.info("Successfully created table DemoAccount.");
 };
 
 const selectAccounts = async () => {
-  console.log(">>>> Selecting accounts:");
-  const rows = await commandWithParams(
-    "SELECT name, age, country, balance FROM DemoAccount"
-  );
+  Logger.info("Selecting accounts:");
+  const result = await ExecuteSQLWithParams("SELECT name, age, country, balance FROM DemoAccount");
 
-  for (const row of rows) {
-    console.log(
-      "name = %s, age = %d, country = %s, balance = %d",
-      row.name,
-      row.age,
-      row.country,
-      row.balance
-    );
+  for (const row of result.rows) {
+    Logger.info("Account", {
+      name: row.name,
+      age: row.age,
+      country: row.country,
+      balance: row.balance
+    });
   }
 };
 
 const transferMoneyBetweenAccounts = async (amount) => {
   let client;
   try {
-    client = await startTransaction();
+    client = await StartTransaction();
 
-    await executeSQLTransaction(
+    await ExecuteSQLTransaction(
       client,
       "UPDATE DemoAccount SET balance = balance - $1 WHERE name = 'Jessica'",
       [amount]
     );
-    await executeSQLTransaction(
+    await ExecuteSQLTransaction(
       client,
       "UPDATE DemoAccount SET balance = balance + $1 WHERE name = 'John'",
       [amount]
     );
 
-    await commitTransaction(client);
+    await CommitTransaction(client);
 
-    console.log(">>>> Transferred %d between accounts.", amount);
+    Logger.info(`Transferred ${amount} between accounts.`);
   } catch (err) {
     if (client) {
-      await rollbackTransaction(client);
+      await RollbackTransaction(client);
     }
-    if (err.code == 40001) {
-      console.error(
-        `The operation is aborted due to a concurrent transaction that is modifying the same set of rows. Consider adding retry logic or using the pessimistic locking.`
-      );
-    }
-    throw err;
+    Logger.error("Transaction failed", { error: err.message });
   }
 };
 
 const main = async () => {
   try {
-    await DBConnection();
+    InitLogger();
+    await Connect();
+
     await createDatabase();
     await selectAccounts();
     await transferMoneyBetweenAccounts(800);
     await selectAccounts();
+
+    await CloseDB();
   } catch (err) {
     console.error("Error during execution:", err);
   }
-  // Pool keeps the process alive, allow explicit exit or let it run if it was a server
-  process.exit(0);
 };
 
 await main();
